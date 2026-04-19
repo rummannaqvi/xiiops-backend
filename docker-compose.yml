@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  # ── PostgreSQL (for chat history persistence from Project B) ──────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: xiiops_db
+    environment:
+      POSTGRES_USER: xiiops_user
+      POSTGRES_PASSWORD: xiiops_password
+      POSTGRES_DB: xiiops_context_graph
+    ports:
+      - "5433:5432"
+    volumes:
+      - xiiops_pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xiiops_user -d xiiops_context_graph"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── XiiOps Backend (merged Project A + B) ────────────────────────────────
+  backend:
+    build: .
+    container_name: xiiops_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - DATABASE_URL=postgresql://xiiops_user:xiiops_password@postgres:5432/xiiops_context_graph
+    volumes:
+      - ./terraform_states:/app/terraform_states
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  xiiops_pg_data:
