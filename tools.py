@@ -24,7 +24,7 @@ def analyze_github_repo(repo_url: str) -> str:
     and extracts the contents of key dependency files to understand the tech stack.
     """
     try:
-        repo_path = repo_url.replace("https://github.com/", "").replace(".git", "")
+        repo_path = repo_url.replace("[https://github.com/](https://github.com/)", "").replace(".git", "")
         if repo_path.endswith("/"):
             repo_path = repo_path[:-1]
 
@@ -71,8 +71,14 @@ def save_infrastructure_code(file_name: str, code_content: str) -> str:
     file_path = os.path.join(save_dir, safe_file_name)
 
     try:
+        # BYPASS MARKDOWN UI BUG: Generate backticks dynamically
+        ticks = "`" * 3
+        clean_content = code_content.replace(f"{ticks}terraform", "")
+        clean_content = clean_content.replace(f"{ticks}hcl", "")
+        clean_content = clean_content.replace(ticks, "")
+        clean_content = clean_content.strip()
+        
         with open(file_path, "w") as f:
-            clean_content = code_content.replace("```terraform", "").replace("```hcl", "").replace("```", "").strip()
             f.write(clean_content)
         return f"Success! I have generated the code and saved it to {save_dir}/{safe_file_name}."
     except Exception as e:
@@ -148,9 +154,33 @@ def save_cicd_workflow(file_name: str, code_content: str) -> str:
     file_path = os.path.join(save_dir, safe_file_name)
 
     try:
+        # BYPASS MARKDOWN UI BUG: Generate backticks dynamically
+        ticks = "`" * 3
+        clean_content = code_content.replace(f"{ticks}yaml", "")
+        clean_content = clean_content.replace(f"{ticks}yml", "")
+        clean_content = clean_content.replace(ticks, "")
+        clean_content = clean_content.strip()
+        
         with open(file_path, "w") as f:
-            clean_content = code_content.replace("```yaml", "").replace("```yml", "").replace("```", "").strip()
             f.write(clean_content)
         return f"Success! CI/CD workflow generated and saved to {file_path}."
     except Exception as e:
         return f"Critical Error: Failed to save CI/CD file. Details: {str(e)}"
+
+@tool
+def read_github_repo_file(repo_url: str, file_path: str) -> str:
+    """
+    Reads the specific content of a file from a GitHub repository.
+    Use this when you need to inspect a specific file (e.g., 'main.py', 'src/App.tsx') to debug or explain code.
+    """
+    try:
+        repo_path = repo_url.replace("[https://github.com/](https://github.com/)", "").replace(".git", "")
+        if repo_path.endswith("/"): 
+            repo_path = repo_path[:-1]
+            
+        repo = gh_client.get_repo(repo_path)
+        file_data = repo.get_contents(file_path)
+        
+        return f"--- {file_path} ---\n{file_data.decoded_content.decode('utf-8')}"
+    except Exception as e:
+        return f"Error reading {file_path}: {str(e)}"

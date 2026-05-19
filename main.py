@@ -38,7 +38,7 @@ from docker_ops import write_dockerfile, build_image, push_image, login_docker
 from ssh_ops import ensure_ssh_keys, deploy_to_server
 from utils import clone_repo, get_file_tree
 from infra_ops import write_terraform_file, run_terraform_command, run_terraform_destroy
-from tools import analyze_github_repo, save_infrastructure_code, execute_terraform_plan, read_local_file, save_cicd_workflow
+from tools import analyze_github_repo, save_infrastructure_code, execute_terraform_plan, read_local_file, save_cicd_workflow, read_github_repo_file
 from database import init_db
 
 # --- SILENCE PARAMIKO NOISE ---
@@ -349,10 +349,26 @@ def run_cicd_pipeline(repo_url: str, pusher_name: str, commit_message: str):
 
 DB_URL = os.getenv("DATABASE_URL")
 
-agent_system_prompt = """You are XiiOps, an expert AI-driven Platform Engineer and Site Reliability Engineer (SRE).
-Your core philosophy is the "Glass Box" approach: you generate highly transparent, portable Infrastructure-as-Code (Terraform/OpenTofu).
-Your goal is to assist developers in analyzing repositories, generating CI/CD workflows, and provisioning AWS resources.
-Communicate directly, technically, and concisely."""
+agent_system_prompt = """You are XiiOps Agent, an expert AI Platform Engineer, Site Reliability Engineer (SRE), and UI Guide.
+You are integrated directly into the XiiOps Platform dashboard.
+
+YOUR CAPABILITIES & SCOPE:
+1. READ-ONLY ADVISOR: You CANNOT trigger deployments, create infrastructure, or destroy resources on your own. Only the user can do this via the UI buttons.
+2. CONTEXT AWARE: The user's prompt contains hidden [SYSTEM CONTEXT] including real-time pipeline logs, IP, and deployment status. Use this to debug errors and answer questions.
+3. REPO ANALYSIS: Use your tools to read the GitHub repository to explain the app structure, code, or suggest optimizations.
+4. UI GUIDE: You know the XiiOps dashboard layout. Guide users on how to use it.
+5. STRICT SCOPE: If a request is beyond your capabilities or the platform's current scope, explicitly state: "This is beyond the scope of the current version of XiiOps." Do not hallucinate features.
+
+XIIOPS UI LAYOUT (Guide the user to these tabs when needed):
+- "AI Agent": Where you are chatting right now.
+- "Console": View pipeline logs, set Environment Variables, and click "Trigger Deploy".
+- "Infrastructure": Select instance size/region, and click "Create Infrastructure" (Terraform) or click "Connect Existing".
+- "Monitor": View live AWS CloudWatch telemetry (CPU, Network, Disk I/O). Tell the user to check this tab if they ask about server health or performance.
+- "Credentials": Vault for Docker Hub, Git, and AWS keys.
+- "Danger": Export configs to GitHub, or click "Destroy AWS Resources".
+
+Be direct, technical, and helpful. Do not repeat the raw system context back to the user unless explaining an error.
+"""
 
 agent_prompt = ChatPromptTemplate.from_messages([
     ("system", agent_system_prompt),
@@ -361,7 +377,8 @@ agent_prompt = ChatPromptTemplate.from_messages([
     MessagesPlaceholder(variable_name="agent_scratchpad"),
 ])
 
-agent_tools = [analyze_github_repo, save_infrastructure_code, execute_terraform_plan, read_local_file, save_cicd_workflow]
+# ONLY pass read-only tools. The AI can no longer write code or run Terraform!
+agent_tools = [analyze_github_repo, read_github_repo_file]
 agent = create_tool_calling_agent(llm, agent_tools, agent_prompt)
 
 # FIX 1: Turn off verbose mode to stop the StdOutCallbackHandler AttributeError spam
@@ -424,7 +441,11 @@ def fetch_history(session_id: str) -> list:
     chat_history = []
     for msg in history.messages:
         if msg.type == "human":
-            chat_history.append({"role": "user", "content": str(msg.content)})
+            # We filter out the hidden [SYSTEM CONTEXT] block when sending history back to the UI
+            content_str = str(msg.content)
+            if "[SYSTEM CONTEXT]" in content_str:
+                content_str = content_str.split("[USER MESSAGE]")[-1].strip()
+            chat_history.append({"role": "user", "content": content_str})
         elif msg.type == "ai":
             content = msg.content
             if isinstance(content, list):
