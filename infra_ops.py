@@ -33,6 +33,13 @@ def run_terraform_command(repo_path, command, env_vars):
 
 def run_terraform_destroy(repo_path: str, env_vars: dict):
     """Specific function to destroy infrastructure."""
-    for _ in run_command(["terraform", "init"], cwd=repo_path, env=env_vars):
-        pass
+    # 1. Force re-initialization
+    for line in run_command(["terraform", "init", "-reconfigure"], cwd=repo_path, env=env_vars):
+        yield line
+        
+    # 2. Force a state refresh against actual AWS reality
+    for line in run_command(["terraform", "refresh"], cwd=repo_path, env=env_vars):
+        yield line
+        
+    # 3. Destroy whatever is currently recognized
     return run_command(["terraform", "destroy", "-auto-approve"], cwd=repo_path, env=env_vars)

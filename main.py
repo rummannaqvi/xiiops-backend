@@ -633,9 +633,13 @@ async def generate_and_build(payload: BuildRequest):
                 with open(target_df_path, "w") as f:
                     f.write(df_content)
 
-                tag = f"{payload.docker_username}/{repo_name}-{svc_name}:latest"
+                # ─── SANITIZE DOCKER USERNAME ───
+                # Extract prefix if user passed an email address
+                clean_docker_user = payload.docker_username.split("@")[0]
+
+                tag = f"{clean_docker_user}/{repo_name}-{svc_name}:latest"
                 if strategy == 'single':
-                    tag = f"{payload.docker_username}/{repo_name}:latest"
+                    tag = f"{clean_docker_user}/{repo_name}:latest"
 
                 yield json.dumps({"status": "building", "message": f"🐳 Building {svc_name}..."}) + "\n"
 
@@ -659,39 +663,51 @@ async def generate_and_build(payload: BuildRequest):
 
             if strategy == "compose":
                 prod_compose = final_plan.get("docker_compose_prod", "")
+                clean_docker_user = payload.docker_username.split("@")[0]
 
-                if not prod_compose or "build:" in prod_compose:
-                    yield json.dumps({"status": "info", "message": "🔒 Enforcing Production Config..."}) + "\n"
-
-                with open(os.path.join(repo_path, "docker-compose.yml"), "w") as f:
-                    f.write(prod_compose)
+                if prod_compose:
+                    with open(os.path.join(repo_path, "docker-compose.yml"), "w") as f:
+                        f.write(prod_compose)
 
                 with open(os.path.join(repo_path, "docker-compose.yml"), "r") as f:
                     content = f.read()
 
-                if "build:" in content:
-                    yield json.dumps({"status": "healing", "message": "🩹 Patching Compose File..."}) + "\n"
-                    lines = content.splitlines()
-                    new_lines = []
-                    current_service = None
-                    for line in lines:
-                        if "services:" in line:
-                            new_lines.append(line)
-                            continue
-                        m = re.match(r'^  (\w+):', line)
-                        if m: current_service = m.group(1)
-                        if "build:" in line:
-                            if current_service:
-                                img = f"{payload.docker_username}/{repo_name}-{current_service}:latest"
-                                new_lines.append(f"    image: {img}")
-                            else:
-                                new_lines.append("    # Build removed")
-                        elif "volumes:" in line and "./" in line:
-                            new_lines.append("    # Volume removed")
-                        else:
-                            new_lines.append(line)
-                    with open(os.path.join(repo_path, "docker-compose.yml"), "w") as f:
-                        f.write("\n".join(new_lines))
+                # --- BULLETPROOF COMPOSE PATCHER ---
+                lines = content.splitlines()
+                new_lines = []
+                current_service = None
+                built_service_names = [s['name'] for s in services]
+
+                for line in lines:
+                    # Detect exactly 2 spaces indicating a service block
+                    m = re.match(r'^  ([a-zA-Z0-9_-]+):', line)
+                    if m:
+                        current_service = m.group(1)
+                        new_lines.append(line)
+                        
+                        # Immediately inject the VERIFIED image tag for services we built
+                        if current_service in built_service_names:
+                            correct_tag = f"{clean_docker_user}/{repo_name}-{current_service}:latest"
+                            new_lines.append(f"    image: {correct_tag}")
+                        continue
+
+                    # If inside a built service, drop any hallucinated image tags from the AI
+                    if "image:" in line and current_service in built_service_names:
+                        continue
+                        
+                    # Drop all local build directives completely
+                    stripped = line.strip()
+                    if stripped.startswith("build:") or stripped.startswith("context:") or stripped.startswith("dockerfile:"):
+                        continue
+                        
+                    # Drop local volume mounts (they crash remote servers)
+                    if "volumes:" in line and "./" in line:
+                        continue
+                        
+                    new_lines.append(line)
+
+                with open(os.path.join(repo_path, "docker-compose.yml"), "w") as f:
+                    f.write("\n".join(new_lines))
 
             yield json.dumps({"status": "success", "message": "Artifacts Ready."}) + "\n"
 
@@ -711,25 +727,26 @@ async def generate_and_provision(payload: InfraRequest):
     private_key_b64, public_key_ssh = ensure_ssh_keys()
 
     prompt = PromptTemplate.from_template(
-        """
-        You are a Terraform Expert. Write a 'main.tf' for AWS.
+            """
+            You are a Terraform Expert. Write a 'main.tf' for AWS.
 
-        Requirements:
-        1. Provider: "aws", Region: "{region}".
-        2. Key Pair: Create 'aws_key_pair' named "{key_name}" using public_key: "{public_key}".
-        3. Security Group: Create 'aws_security_group' allowing HTTP (80), HTTPS (443), SSH (22), 3000, 8000. Name prefix "xiiops_sg_".
-        4. Resource: Create 'aws_instance' named "xiiops_instance".
-           - AMI: 'ami-0c7217cdde317cfec' (Ubuntu 22.04 us-east-1)
-           - Instance Type: "{instance_type}"
-           - Key Name: "{key_name}"
-           - vpc_security_group_ids: [aws_security_group.<YOUR_SG_NAME>.id]
-           - Tags: Name = "{instance_name}"
-           - User Data: None
-        5. Output: 'public_ip'.
+            Requirements:
+            1. Provider: "aws", Region: "{region}".
+            2. Data Source: Use a 'data "aws_ami"' block to dynamically fetch the most recent Ubuntu 22.04 LTS AMI for the current region.
+            3. Key Pair: Create 'aws_key_pair' named "{key_name}" using public_key: "{public_key}".
+            4. Security Group: Create 'aws_security_group' allowing HTTP (80), HTTPS (443), SSH (22), 3000, 8000. Name prefix "xiiops_sg_".
+            5. Resource: Create 'aws_instance' named "xiiops_instance".
+               - AMI: Use the ID from the data source in step 2.
+               - Instance Type: "{instance_type}"
+               - Key Name: "{key_name}"
+               - vpc_security_group_ids: [aws_security_group.<YOUR_SG_NAME>.id]
+               - Tags: Name = "{instance_name}"
+               - User Data: None
+            6. Output: 'public_ip'.
 
-        RETURN CODE ONLY. NO MARKDOWN.
-        """
-    )
+            RETURN CODE ONLY. NO MARKDOWN.
+            """
+        )
 
 
     def log_streamer():
@@ -774,7 +791,8 @@ async def generate_and_provision(payload: InfraRequest):
             last_ip = None
 
             for line in run_terraform_command(repo_path, "apply", env_vars):
-                if "public_ip =" in line:
+                # Ignore the generic plan output to avoid false positives
+                if "public_ip =" in line and "known after apply" not in line:
                     try:
                         last_ip = line.split("=")[1].strip().replace('"', '')
                     except:
@@ -893,7 +911,15 @@ async def deploy_app(payload: DeployRequest):
         final_env_vars = payload.env_vars.copy()
 
         try:
-            repo_path = clone_repo(payload.repo_url, payload.git_token)
+            # --- THE FIX: Stop wiping the directory! ---
+            # Preserve the modified docker-compose.yml from the build step
+            target_dir = os.path.join("/tmp/xiiops_repos", repo_name)
+            if os.path.exists(target_dir):
+                repo_path = target_dir
+                yield json.dumps({"status": "info", "message": "📂 Using preserved build artifacts..."}) + "\n"
+            else:
+                repo_path = clone_repo(payload.repo_url, payload.git_token)
+            
             content_scan = scan_for_env_vars(repo_path)
             secret_keywords = ["JWT_SECRET", "SECRET_KEY", "SESSION_SECRET", "AUTH_TOKEN", "API_KEY", "ACCESS_TOKEN"]
 
